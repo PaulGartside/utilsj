@@ -21,23 +21,32 @@
 # DEALINGS IN THE SOFTWARE.                                                  #
 ##############################################################################
 
-.PHONE: all clean install
+NAME = File_put
 
-all: File_put.jar
+.PHONY: jar_file clean install
+
+jar_file: $(NAME).jar
+
+SOURCES = File_put
+
+CLASS_DIR = classes
+CLASS_FILES = $(addprefix $(CLASS_DIR)/,$(addsuffix .class,$(SOURCES)))
+
+$(NAME).jar: $(CLASS_DIR) $(CLASS_FILES)
+	jar -cvfe $@ $(NAME) -C $(CLASS_DIR) .
+	@echo Done making $@
 
 clean:
-	\rm -rf classes
+	\rm -rf $(CLASS_DIR)
 	\rm -rf *.jar
 
 install:
-	@echo "Add your own install command to the Makefile"
+	cp $(NAME).jar $(HOME)/bin
+#@echo "Add your own install command to the Makefile"
 
-File_put.jar: classes classes/File_put.class
-	jar -cvfe $@ File_put -C classes .
+$(CLASS_DIR):
+	mkdir -p $(CLASS_DIR)
 
-classes:
-	mkdir classes
-
-classes/%.class: %.java
-	javac -d classes $<
+$(CLASS_FILES): $(CLASS_DIR)/%.class: %.java
+	javac -cp . -d $(CLASS_DIR) $<
 

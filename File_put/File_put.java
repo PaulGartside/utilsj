@@ -138,8 +138,10 @@ class File_put
   {
     if( !m_peer_addr.isReachable( 500 ) )
     {
-      Die(m_peer_str + ": Un-reachable");
+      Die( m_peer_str + ": Un-reachable");
     }
+    m_stats.Set_Start_Time();
+
     Send_Put_Request();
 
     Wait_4_Initial_Ack( 500 );
@@ -148,12 +150,17 @@ class File_put
     {
       Send_Data();
 
+      Resend_packets_not_acked( 500 );
+
       Recv_Ack();
+
+      Check_4_Timeout();
     }
     m_fis.close();
 
     if( m_success )
     {
+      System.out.println();
       Msg( "Sent to "
          + m_peer_addr.getHostAddress() +":"
          + SERVER_PORT +": "
@@ -225,6 +232,8 @@ class File_put
                           | ( pkt_data[4] <<  0 & 0x000000FF );
         if( 0 == pkt_num )
         {
+          m_last_acq_time = System.currentTimeMillis();
+
           return true;
         }
       }
@@ -244,7 +253,8 @@ class File_put
   }
   void Send_Data() throws IOException
   {
-    if( !m_sent_last_pkt && m_sent.size() < MAX_WINDOW_SIZE )
+//System.out.print( m_sent.size() );
+    while( !m_sent_last_pkt && m_sent.size() < MAX_WINDOW_SIZE )
     {
       // Read from source file:
       int bytes_read = m_fis.read( m_bytes, 0, 512 );
@@ -266,6 +276,8 @@ class File_put
 
       m_stats.Set_Window( m_sent.size() );
       m_stats.Inc_Pkts_Sent();
+
+      if( m_last_sent_pkt % 2048 == 0 ) System.out.print(".");
     }
   }
   DatagramPacket Assemble_Pkt_2_Send( final int bytes_read )
@@ -290,25 +302,15 @@ class File_put
 
     return data_pkt;
   }
-  void Recv_Ack() throws IOException, SocketException
+  void Recv_Ack() throws IOException
   {
-    if( m_sent.size() < MAX_WINDOW_SIZE )
+    while( Socket_Has_Data( 1 ) )
     {
-      if( Socket_Has_Data() )
-      {
-        Handle_Ack();
-      }
+      Handle_Ack();
     }
-    else {
-      m_socket.setSoTimeout( 500 );
-      m_socket.receive( m_ack_pkt );
-
-      if( m_ack_pkt.getAddress().equals( m_peer_addr )
-       && m_ack_pkt.getPort() == SERVER_PORT )
-      {
-        Handle_Ack();
-      }
-    }
+  }
+  void Resend_packets_not_acked( final int timeout_ms ) throws IOException
+  {
     // Resend data packets for which we have not received an ack:
     Iterator<Sent_Pkt_Info> I = m_sent.values().iterator();
     while( I.hasNext() )
@@ -316,7 +318,7 @@ class File_put
       final long time_ms = System.currentTimeMillis();
 
       Sent_Pkt_Info pkt_info = I.next();
-      if( 500 < time_ms - pkt_info.m_time )
+      if( timeout_ms < time_ms - pkt_info.m_time )
       {
         // Have not received an ack, so resend data:
         m_socket.send( pkt_info.m_pkt );
@@ -325,10 +327,11 @@ class File_put
       }
     }
   }
-  boolean Socket_Has_Data() throws IOException, SocketException
+  boolean Socket_Has_Data( final int timeout_ms ) throws IOException
+                                                       , SocketException
   {
     try {
-      m_socket.setSoTimeout( 1 );
+      m_socket.setSoTimeout( timeout_ms );
       m_socket.receive( m_ack_pkt );
 
       if( m_ack_pkt.getAddress().equals( m_peer_addr )
@@ -339,6 +342,7 @@ class File_put
     }
     catch( SocketTimeoutException e )
     {
+      // Timed out, so socket has not received any data
     }
     return false;
   }
@@ -361,7 +365,9 @@ class File_put
                             | ( pkt_data[4] <<  0 & 0x000000FF );
           if( m_sent.containsKey( pkt_num ) )
           {
+//System.out.print( 'a' );
             m_sent.remove( pkt_num );
+            m_last_acq_time = System.currentTimeMillis();
 
             if( m_sent_last_pkt && 0==m_sent.size() )
             {
@@ -374,10 +380,30 @@ class File_put
       }
     }
   }
+  void Check_4_Timeout()
+  {
+    if( m_running )
+    {
+      final long time_ms = System.currentTimeMillis();
+      final long elasped_time_since_acq = time_ms - m_last_acq_time;
+
+      if( ACK_TIMEOUT_MS < elasped_time_since_acq )
+      {
+        m_running = false;
+
+        // Ack not received in timeout_ms, so exit:
+        System.out.println();
+        Msg( m_stats.toString() );
+        Die("Timed out waiting for ack");
+      }
+    }
+  }
+  static final long ACK_TIMEOUT_MS  = 2000;
+  static final int  MAX_WINDOW_SIZE = 8;
+
   static final int  SERVER_PORT    = 6969;
   static final int  MAX_DATA_SIZE  = 512;
   static final int  MAX_PKT_SIZE   = MAX_DATA_SIZE + 5;
-  static final int  MAX_WINDOW_SIZE = 8;
   static final int  ACK_SIZE       = 5;
   static final byte OPCODE_GET_REQ = 1;
   static final byte OPCODE_PUT_REQ = 2;
@@ -404,6 +430,7 @@ class File_put
   boolean m_sent_last_pkt = false;
   int     m_last_sent_pkt = 0; // Packet numbers start at 1
   Stats   m_stats         = new Stats();
+  long    m_last_acq_time = 0;
 
   HashMap<Integer,Sent_Pkt_Info> m_sent = new HashMap<>();
 }
@@ -421,10 +448,15 @@ class Sent_Pkt_Info
 
 class Stats
 {
+  long m_start_time = 0;
   int m_max_window  = 0;
   int m_num_resends = 0;
   int m_pkts_sent   = 0;
 
+  void Set_Start_Time()
+  {
+    m_start_time = System.currentTimeMillis();
+  }
   void Set_Window( final int window_size )
   {
     m_max_window = Math.max( window_size, m_max_window );
@@ -439,9 +471,17 @@ class Stats
   }
   public String toString()
   {
+    final long finish_time = System.currentTimeMillis();
+    final long millis = finish_time - m_start_time;
+    final double secs = ((double)(millis))/((double)1000);
+    final double bits = m_pkts_sent*512*8;
+
+    final long bits_per_sec = (long)(bits/secs + 0.5);
+
     return "Max Window="+ m_max_window
          + ", Num Resends="+ m_num_resends
-         + ", Pkts Sent="+ m_pkts_sent;
+         + ", Pkts Sent="+ m_pkts_sent
+         + ", Bits/Sec="+ bits_per_sec;
   }
 }
 

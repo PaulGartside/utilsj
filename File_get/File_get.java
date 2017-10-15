@@ -179,7 +179,7 @@ class File_get
   }
   void Recv_Data() throws SocketException, IOException
   {
-    Wait_4_Data_Packet( 500 );
+    Wait_4_Data_Packet( 2000 );
 
     if( m_running )
     {
@@ -196,7 +196,7 @@ class File_get
             // Received a packet out of order, so cache it:
             m_data.put( m_rcvd_pkt_num, m_data_pkt );
           }
-          else { // Received next packet, to save to file:
+          else { // Received next packet, so save to file:
             Save_Packet_2_File( m_data_pkt );
 
             // See how many other previously cached packets can be saved to file:

@@ -1,6 +1,6 @@
 ##############################################################################
 # Java Utilities                                                             #
-# Copyright (c) 10 Mar 2017 Paul J. Gartside                                 #
+# Copyright (c) 10 Oct 2017 Paul J. Gartside                                 #
 ##############################################################################
 # Permission is hereby granted, free of charge, to any person obtaining a    #
 # copy of this software and associated documentation files (the "Software"), #
@@ -21,23 +21,34 @@
 # DEALINGS IN THE SOFTWARE.                                                  #
 ##############################################################################
 
-.PHONE: all clean install
+NAME = File_server
 
-all: File_server.jar
+.PHONY: jar_file clean install
+
+jar_file: $(NAME).jar
+
+SOURCES = File_server \
+          Handle_Get \
+          Handle_Put
+
+CLASS_DIR = classes
+CLASS_FILES = $(addprefix $(CLASS_DIR)/,$(addsuffix .class,$(SOURCES)))
+
+$(NAME).jar: $(CLASS_DIR) $(CLASS_FILES)
+	jar -cvfe $@ $(NAME) -C $(CLASS_DIR) .
+	@echo Done making $@
 
 clean:
-	\rm -rf classes
+	\rm -rf $(CLASS_DIR)
 	\rm -rf *.jar
 
 install:
-	@echo "Add your own install command to the Makefile"
+	cp $(NAME).jar $(HOME)/bin
+#@echo "Add your own install command to the Makefile"
 
-File_server.jar: classes classes/File_server.class
-	jar -cvfe $@ File_server -C classes .
+$(CLASS_DIR):
+	mkdir -p $(CLASS_DIR)
 
-classes:
-	mkdir classes
-
-classes/%.class: %.java
-	javac -d classes $<
+$(CLASS_FILES): $(CLASS_DIR)/%.class: %.java
+	javac -cp . -d $(CLASS_DIR) $<
 

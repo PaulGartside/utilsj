@@ -46,21 +46,21 @@ import java.util.Iterator;
 //               --------------------
 // Read  Request | 1 | filename | 0 |
 // GET           --------------------
-// 
+//
 //               --------------------
 // Write Request | 2 | filename | 0 |
 // PUT           --------------------
-// 
+//
 //                   |< 4 bytes >| 0 to 512 bytes|
 //               ---------------------------------
 // Data Packet   | 3 | packetnum | data          |
 // DATA          ---------------------------------
-// 
+//
 //                   |< 4 bytes >|
 //               -----------------
 // Acknowledge   | 4 | packetnum |
 // ACK           -----------------
-// 
+//
 //               ---------------------
 // Error         | 5 | errstring | 0 |
 // ERROR         ---------------------
@@ -127,7 +127,7 @@ class Handle_Put
   }
   void Recv_Data() throws SocketException, IOException
   {
-    Wait_4_Data_Packet( 500 );
+    Wait_4_Data_Packet( 4000 );
 
     if( m_running )
     {
@@ -144,7 +144,7 @@ class Handle_Put
             // Received a packet out of order, so cache it:
             m_data.put( m_rcvd_pkt_num, m_data_pkt );
           }
-          else { // Received next packet, to save to file:
+          else { // Received next packet, so save to file:
             Save_Packet_2_File( m_data_pkt );
 
             // See how many other previously cached packets can be saved to file:
@@ -209,6 +209,28 @@ class Handle_Put
     }
     m_running = false;
   }
+//void
+//Wait_4_Data_Packet( final long TIMEOUT ) throws SocketException
+//                                              , IOException
+//{
+//  final long START_TIME = System.currentTimeMillis();
+//
+//  while( true )
+//  {
+//    m_data_pkt.setLength( MAX_PKT_SIZE );
+//    m_socket.receive( m_data_pkt );
+//
+//    if( m_data_pkt.getAddress().equals( m_peer_addr )
+//     && m_data_pkt.getPort() == m_peer_port )
+//    {
+//      return; // Received a packet from TGT_ADDR:TGT_PORT
+//    }
+//    else {
+//      ; // Packet not from target process, so wait for another packet
+//    }
+//  }
+////m_running = false;
+//}
   void Get_Packet_Info()
   {
     m_pkt_is_data  = false;
@@ -225,8 +247,8 @@ class Handle_Put
       {
         m_pkt_is_data = true;
         m_rcvd_pkt_num = ( pkt_data[1] << 24 & 0xFF000000 )
-                       | ( pkt_data[2] << 16 & 0x00FF0000 ) 
-                       | ( pkt_data[3] <<  8 & 0x0000FF00 ) 
+                       | ( pkt_data[2] << 16 & 0x00FF0000 )
+                       | ( pkt_data[3] <<  8 & 0x0000FF00 )
                        | ( pkt_data[4] <<  0 & 0x000000FF );
       }
     }

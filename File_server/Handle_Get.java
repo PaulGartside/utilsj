@@ -93,20 +93,46 @@ class Handle_Get
   {
     System.out.println("File_server: " + msg );
   }
+//void Run() throws FileNotFoundException, IOException
+//{
+//  Send_Data();
+//
+//  while( m_running )
+//  {
+//    Recv_Ack();
+//
+//    Send_Data();
+//
+//    Resend_packets_not_acked( 500 );
+//  }
+//  m_fis.close();
+//
+//  if( m_success )
+//  {
+//    Msg( "Sent to "
+//       + m_peer_addr.getHostAddress() +":"
+//       + m_peer_port +": "
+//       + m_in_fname );
+//    Msg( m_stats.toString() );
+//  }
+//}
   void Run() throws FileNotFoundException, IOException
   {
-    Send_Data();
-
     while( m_running )
     {
+      Send_Data();
+
+      Resend_packets_not_acked( 500 );
+
       Recv_Ack();
 
-      Send_Data();
+      Check_4_Timeout();
     }
     m_fis.close();
 
     if( m_success )
     {
+      System.out.println();
       Msg( "Sent to "
          + m_peer_addr.getHostAddress() +":"
          + m_peer_port +": "
@@ -116,7 +142,7 @@ class Handle_Get
   }
   void Send_Data() throws IOException
   {
-    if( !m_sent_last_pkt && m_sent.size() < MAX_WINDOW_SIZE )
+    while( !m_sent_last_pkt && m_sent.size() < MAX_WINDOW_SIZE )
     {
       // Read from source file:
       int bytes_read = m_fis.read( m_bytes, 0, 512 );
@@ -162,25 +188,35 @@ class Handle_Get
 
     return data_pkt;
   }
-  void Recv_Ack() throws IOException, SocketException
+//void Recv_Ack() throws IOException, SocketException
+//{
+//  if( m_sent.size() < MAX_WINDOW_SIZE )
+//  {
+//    if( Socket_Has_Data() )
+//    {
+//      Handle_Ack();
+//    }
+//  }
+//  else {
+//    m_socket.setSoTimeout( 500 );
+//    m_socket.receive( m_ack_pkt );
+//
+//    if( m_ack_pkt.getAddress().equals( m_peer_addr )
+//     && m_ack_pkt.getPort() == m_peer_port )
+//    {
+//      Handle_Ack();
+//    }
+//  }
+//}
+  void Recv_Ack() throws IOException
   {
-    if( m_sent.size() < MAX_WINDOW_SIZE )
+    while( Socket_Has_Data( 1 ) )
     {
-      if( Socket_Has_Data() )
-      {
-        Handle_Ack();
-      }
+      Handle_Ack();
     }
-    else {
-      m_socket.setSoTimeout( 500 );
-      m_socket.receive( m_ack_pkt );
-
-      if( m_ack_pkt.getAddress().equals( m_peer_addr )
-       && m_ack_pkt.getPort() == m_peer_port )
-      {
-        Handle_Ack();
-      }
-    }
+  }
+  void Resend_packets_not_acked( final int timeout_ms ) throws IOException
+  {
     // Resend data packets for which we have not received an ack:
     Iterator<Sent_Pkt_Info> I = m_sent.values().iterator();
     while( I.hasNext() )
@@ -188,7 +224,7 @@ class Handle_Get
       final long time_ms = System.currentTimeMillis();
 
       Sent_Pkt_Info pkt_info = I.next();
-      if( 500 < time_ms - pkt_info.m_time )
+      if( timeout_ms < time_ms - pkt_info.m_time )
       {
         // Have not received an ack, so resend data:
         m_socket.send( pkt_info.m_pkt );
@@ -197,10 +233,11 @@ class Handle_Get
       }
     }
   }
-  boolean Socket_Has_Data() throws IOException, SocketException
+  boolean Socket_Has_Data( final int timeout_ms ) throws IOException
+                                                       , SocketException
   {
     try {
-      m_socket.setSoTimeout( 1 );
+      m_socket.setSoTimeout( timeout_ms );
       m_socket.receive( m_ack_pkt );
 
       if( m_ack_pkt.getAddress().equals( m_peer_addr )
@@ -211,6 +248,7 @@ class Handle_Get
     }
     catch( SocketTimeoutException e )
     {
+      // Timed out, so socket has not received any data
     }
     return false;
   }
@@ -234,6 +272,7 @@ class Handle_Get
           if( m_sent.containsKey( pkt_num ) )
           {
             m_sent.remove( pkt_num );
+            m_last_acq_time = System.currentTimeMillis();
 
             if( m_sent_last_pkt && 0==m_sent.size() )
             {
@@ -246,10 +285,30 @@ class Handle_Get
       }
     }
   }
+  void Check_4_Timeout()
+  {
+    if( m_running )
+    {
+      final long time_ms = System.currentTimeMillis();
+      final long elasped_time_since_acq = time_ms - m_last_acq_time;
+
+      if( ACK_TIMEOUT_MS < elasped_time_since_acq )
+      {
+        m_running = false;
+
+        // Ack not received in timeout_ms, so exit:
+        System.out.println();
+        Msg( m_stats.toString() );
+        Msg("Timed out waiting for ack");
+      }
+    }
+  }
+  static final long ACK_TIMEOUT_MS  = 2000;
   static final int  MAX_WINDOW_SIZE = 8;
-  static final byte OPCODE_DATA     = 3;
-  static final int  ACK_SIZE        = 5;
-  static final byte OPCODE_ACK      = 4;
+
+  static final byte OPCODE_DATA = 3;
+  static final byte OPCODE_ACK  = 4;
+  static final int  ACK_SIZE    = 5;
 
   final DatagramSocket m_socket;
   final InetAddress    m_peer_addr;
@@ -267,6 +326,7 @@ class Handle_Get
   boolean m_sent_last_pkt = false;
   int     m_last_sent_pkt = 0; // Packet numbers start at 1
   Stats   m_stats         = new Stats();
+  long    m_last_acq_time = 0;
 
   HashMap<Integer,Sent_Pkt_Info> m_sent = new HashMap<>();
 }
