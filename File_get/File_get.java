@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 // File Get Java Implementation                                               //
-// Copyright (c) 16 Apr 2017 Paul J. Gartside                                 //
+// Copyright (c) 31 Dec 2019 Paul J. Gartside                                 //
 ////////////////////////////////////////////////////////////////////////////////
 // Permission is hereby granted, free of charge, to any person obtaining a    //
 // copy of this software and associated documentation files (the "Software"), //
@@ -20,63 +20,88 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER        //
 // DEALINGS IN THE SOFTWARE.                                                  //
 ////////////////////////////////////////////////////////////////////////////////
-
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.BufferedOutputStream;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.FileSystems;
-import java.nio.file.Path;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.SocketException;
-import java.net.SocketTimeoutException;
-import java.util.HashMap;
-
 // ---------------------
 // File Protocol Summary
 // ---------------------
 //
-//               --------------------
-// Read  Request | 1 | filename | 0 |
-// GET           --------------------
-// 
-//               --------------------
-// Write Request | 2 | filename | 0 |
-// PUT           --------------------
-// 
-//                   |< 4 bytes >| 0 to 512 bytes|
-//               ---------------------------------
-// Data Packet   | 3 | packetnum | data          |
-// DATA          ---------------------------------
-// 
-//                   |< 4 bytes >|
+//               |<1>|<-- 4 bytes ---->|
+//               ----------------------------------------
+// Read  Request | 1 | Filename length | Filename       |
+// GET           |   | Num utf16 chars | in utf16 chars |
+//               ----------------------------------------
+//
+//               |<1>|< 1 byte >|<-- 4 bytes ------>|
+// Read          ------------------------------------
+// Response      | 2 | True=1   | num_bytes in file |
+// Affirmative   ------------------------------------
+//
+//               |<1>|< 1 byte >|<-- 4 bytes ---->|
+// Read          ----------------------------------------------
+// Response      | 2 | False=0  | Num utf16 chars | errstring |
+// Negative      |   | 00000000 | in errstring    |           |
+//               ----------------------------------------------
+//
+//               |<1>|< 4 bytes >|<-- 4 bytes ---->|
+//               ----------------------------------------------------
+// Write Request | 3 | num_bytes | Filename length | Filename       |
+// PUT           |   | in file   | Num utf16 chars | in utf16 chars |
+//               ----------------------------------------------------
+//
+//               |<1>|< 1 byte >|
+// Write         ----------------
+// Response      | 4 | True=1   |
+// Affirmative   |   | 00000001 |
+// Affirmative   ----------------
+//
+//               |<1>|< 1 byte >|<-- 4 bytes ---->|
+// Write         ----------------------------------------------
+// Response      | 4 | False=0  | Num utf16 chars | errstring |
+// Negative      |   | 00000000 | in errstring    |           |
+//               ----------------------------------------------
+//
+//               |<1>|
+// Read/Write    -----------------
+// DATA          | 5 | File data |
 //               -----------------
-// Acknowledge   | 4 | packetnum |
-// ACK           -----------------
-// 
-//               ---------------------
-// Error         | 5 | errstring | 0 |
-// ERROR         ---------------------
 //
-// ----------           ----------
-// | Client |           | Server |
-// ----------           ----------
-//     |                    |
-//     |--- Read Request -->|
-//     |                    |
-//     |<-- Data Packet 1 --|
-//     |--- Ack 1 --------->|
-//     |                    |
-//     |<-- Data Packet 2 --|
-//     |<-- Data Packet 3 --|
-//     |--- Ack 2 --------->|
-//     |--- Ack 3 --------->|
-//     |                    |
-//
+// ----------                         ----------
+// | Client |                         | Server |
+// ----------                         ----------
+//     |                                  |
+//     |--- Read Request ---------------->|
+//     |<-- Read Response Affirmative ----|
+//     |<-- File data --------------------|
+//     |                                  |
+//     |--- Read Request ---------------->|
+//     |<-- Read Response Negative -------|
+//     |                                  |
+//     |--- Write Request --------------->|
+//     |<-- Write Response Affirmative ---|
+//     |--- File data ------------------->|
+//     |                                  |
+//     |--- Write Request --------------->|
+//     |<-- Write Response Negative ------|
+//     |                                  |
+
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.lang.StringBuilder;
+import java.net.Socket;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
+import java.nio.file.Files;
+import java.nio.file.FileSystems;
+import java.nio.file.Path;
+import java.nio.channels.IllegalBlockingModeException;
 
 class File_get
 {
@@ -85,9 +110,7 @@ class File_get
     if( args.length < 2 || 3 < args.length ) Usage();
 
     try {
-      File_get me = new File_get( args );
-
-      me.Run();
+      new File_get( args ).Run();
     }
     catch( Exception e )
     {
@@ -111,221 +134,318 @@ class File_get
   void Die( String msg )
   {
     Msg( msg );
-    System.exit( 0 );
-  }
-  File_get( String[] args ) throws Exception
-  {
-    m_peer_str  = args[0];
-    m_src_fname = args[1];
-    m_dst_fname = args.length == 3 ? args[2] : m_src_fname;
-    m_dst_path  = FileSystems.getDefault().getPath( m_dst_fname );
 
+    m_running = false;
+  }
+  File_get( String[] args )
+  {
+    m_server_str = args[0];
+    m_src_fname  = args[1];
+    m_dst_fname  = args.length == 3 ? args[2] : m_src_fname;
+    m_dst_path   = FileSystems.getDefault().getPath( m_dst_fname );
+
+    m_socket = new Socket();
+  }
+  void Run()
+  {
+    Check_Destination_File();
+    Check_Server_Reachable();
+    Connect();
+    Get_In_Stream();
+    Get_Out_Stream();
+    Send_Read_Request();
+    final long bytes_in_file = Receive_Read_Response();
+    Receive_File_Data( bytes_in_file );
+    Print_summary_message( bytes_in_file );
+
+    Clean_Up();
+  }
+  void Check_Destination_File()
+  {
     if( Files.isDirectory( m_dst_path ) )
     {
       Die( m_dst_fname + " is a directory");
     }
-    File outfile = m_dst_path.toFile();
-
-    m_fos = new FileOutputStream( outfile );
-    m_bos = new BufferedOutputStream( m_fos, 512 );
-
-    m_socket    = new DatagramSocket();
-    m_peer_addr = InetAddress.getByName( m_peer_str );
-  }
-  void Run() throws Exception
-  {
-    if( !m_peer_addr.isReachable( 500 ) )
-    {
-      Die(m_peer_str + ": Un-reachable");
-    }
-    m_ack_pkt.setAddress( m_peer_addr );
-    m_ack_pkt.setPort( SERVER_PORT );
-
-    Send_Get_Request();
-
-    while( m_running )
-    {
-      Recv_Data();
-    }
-    m_bos.flush();
-    m_fos.close();
-
-    if( m_success )
-    {
-      Msg( "Received from "
-         + m_peer_addr.getHostAddress() +":"
-         + SERVER_PORT +": "
-         + m_dst_fname );
-    }
-  }
-  void Send_Get_Request() throws IOException
-  {
-    final int PKT_LEN = m_src_fname.length() + 2;
-
-    DatagramPacket get_pkt = new DatagramPacket( new byte[PKT_LEN], PKT_LEN );
-
-    final byte[] pkt_data = get_pkt.getData();
-    pkt_data[ 0 ] = OPCODE_GET_REQ;
-    for( int k=0; k<m_src_fname.length(); k++ )
-    {
-      pkt_data[ k+1 ] = (byte)m_src_fname.charAt( k );
-    }
-    pkt_data[ PKT_LEN-1 ] = 0;
-
-    get_pkt.setAddress( m_peer_addr );
-    get_pkt.setPort( SERVER_PORT );
-    get_pkt.setData( pkt_data ); // May not be necessary
-    m_socket.send( get_pkt );
-  }
-  void Recv_Data() throws SocketException, IOException
-  {
-    Wait_4_Data_Packet( 2000 );
-
     if( m_running )
     {
-      Get_Packet_Info();
-
-      if( m_pkt_is_data )
-      {
-        final int max_pkt_num = m_next_pkt_num + MAX_WINDOW_SIZE - 1;
-
-        if( m_next_pkt_num <= m_rcvd_pkt_num && m_rcvd_pkt_num <= max_pkt_num )
-        {
-          if( m_next_pkt_num < m_rcvd_pkt_num )
-          {
-            // Received a packet out of order, so cache it:
-            m_data.put( m_rcvd_pkt_num, m_data_pkt );
-          }
-          else { // Received next packet, so save to file:
-            Save_Packet_2_File( m_data_pkt );
-
-            // See how many other previously cached packets can be saved to file:
-            while( m_data.containsKey( m_next_pkt_num ) )
-            {
-              Save_Packet_2_File( m_data.remove( m_next_pkt_num ) );
-            }
-            if( m_got_last_pkt && 0==m_data.size() )
-            {
-              m_running = false;
-              m_success = true;
-            }
-          }
-          // Always ack a received packet:
-          Send_Ack( m_rcvd_pkt_num );
-        }
-      }
+      m_dst_file = m_dst_path.toFile();
     }
   }
-  void Save_Packet_2_File( DatagramPacket pkt ) throws IOException
+  void Check_Server_Reachable()
   {
-    final int data_len = pkt.getLength()-5;
-
-    if( data_len < 512 ) m_got_last_pkt = true;
-
-    m_bos.write( pkt.getData(), 5, data_len );
-    m_next_pkt_num++;
-  }
-  void Send_Ack( final int ack_num ) throws IOException
-  {
-    final byte[] pkt_data = m_ack_pkt.getData();
-    pkt_data[ 0 ] = OPCODE_ACK;
-    pkt_data[ 1 ] = (byte)(ack_num >> 24 & 0xFF);
-    pkt_data[ 2 ] = (byte)(ack_num >> 16 & 0xFF);
-    pkt_data[ 3 ] = (byte)(ack_num >>  8 & 0xFF);
-    pkt_data[ 4 ] = (byte)(ack_num >>  0 & 0xFF);
-    m_ack_pkt.setData( pkt_data ); // May not be necessary
-    m_socket.send( m_ack_pkt );
-  }
-  void
-  Wait_4_Data_Packet( final long TIMEOUT ) throws SocketException
-                                                , IOException
-  {
-    final long START_TIME = System.currentTimeMillis();
-
-    for( long time_left = TIMEOUT
-       ; 0 < time_left
-       ; time_left = TIMEOUT - (System.currentTimeMillis() - START_TIME) )
-    {
-      m_data_pkt.setLength( MAX_PKT_SIZE );
-      m_socket.setSoTimeout( (int)time_left );
-      m_socket.receive( m_data_pkt );
-
-      if( m_data_pkt.getAddress().equals( m_peer_addr )
-       && m_data_pkt.getPort() == SERVER_PORT )
+    if( m_running )
+    try {
+      m_server_inet_addr = InetAddress.getByName( m_server_str );
+      m_server_inet_sock_addr = new InetSocketAddress( m_server_inet_addr
+                                                     , SERVER_PORT );
+      if( !m_server_inet_addr.isReachable( IS_REACHABLE_TIMEOUT_MS ) )
       {
-        return; // Received a packet from TGT_ADDR:TGT_PORT
+        Die(m_server_str + ": Un-reachable");
+      }
+    }
+    catch( UnknownHostException e )
+    {
+      Die(m_server_str + ": UnknownHostException: "+ e);
+    }
+    catch( IOException e )
+    {
+      Die("Check_Server_Reachable(): IOException: "+ e);
+    }
+  }
+  void Connect()
+  {
+    if( m_running )
+    try {
+      m_socket.connect( m_server_inet_sock_addr, CONNECT_TIMEOUT_MS );
+    }
+    catch( SocketTimeoutException e )
+    {
+      Die(m_server_str + ": SocketTimeoutException: " + e);
+    }
+    catch( IOException e )
+    {
+      Die("Connect(): IOException: " + e);
+    }
+    catch( IllegalBlockingModeException e )
+    {
+      Die("Connect(): IllegalBlockingModeException: " + e);
+    }
+    catch( IllegalArgumentException e )
+    {
+      Die("Connect(): IllegalArgumentException: " + e);
+    }
+    catch( Exception e )
+    {
+      Die("Connect(): Exception: " + e);
+    }
+  }
+
+  void Get_In_Stream()
+  {
+    if( m_running )
+    try {
+      InputStream in_stream = m_socket.getInputStream();
+
+      m_din_stream = new DataInputStream( in_stream );
+    }
+    catch( IOException e )
+    {
+      Die(m_server_str + ": m_socket.getInputStream(): IOException: " + e);
+    }
+  }
+  void Get_Out_Stream()
+  {
+    if( m_running )
+    try {
+      OutputStream out_stream = m_socket.getOutputStream();
+
+      m_dout_stream = new DataOutputStream( out_stream );
+    }
+    catch( IOException e )
+    {
+      Die(m_server_str + ": m_socket.getOutputStream(): IOException: " + e);
+    }
+  }
+
+  //               |<1>|<-- 4 bytes ---->|
+  //               ----------------------------------------
+  // Read  Request | 1 | Filename length | Filename       |
+  // GET           |   | Num utf16 chars | in utf16 chars |
+  //               ----------------------------------------
+  void Send_Read_Request()
+  {
+    if( m_running )
+    try {
+      m_dout_stream.writeByte( OPCODE_GET_REQ );
+      m_dout_stream.writeInt( m_src_fname.length() );
+      m_dout_stream.writeChars( m_src_fname );
+      m_dout_stream.flush();
+    }
+    catch( IOException e )
+    {
+      Die("Send_Read_Request(): IOException: " + e);
+    }
+  }
+
+  //               |<1>|< 1 byte >|<-- 4 bytes ------>|
+  // Read          ------------------------------------
+  // Response      | 2 | True=1   | num_bytes in file |
+  // Affirmative   ------------------------------------
+  //
+  //               |<1>|< 1 byte >|<-- 4 bytes ---->|
+  // Read          ----------------------------------------------
+  // Response      | 2 | False=0  | Num utf16 chars | errstring |
+  // Negative      |   | 00000000 | in errstring    |           |
+  //               ----------------------------------------------
+  long Receive_Read_Response()
+  {
+    long bytes_in_file = 0;
+
+    if( m_running )
+    try {
+      final byte resp_OPCODE = m_din_stream.readByte();
+      if( resp_OPCODE != OPCODE_GET_RESP )
+      {
+        Die( m_server_str +": expected read response OPCODE "+ OPCODE_GET_RESP
+                          +" but received "+ resp_OPCODE );
+      }
+      final byte response = m_din_stream.readByte();
+      if( response != 0 )
+      {
+        bytes_in_file = m_din_stream.readInt();
       }
       else {
-        ; // Packet not from target process, so wait for another packet
-      }
-    }
-    m_running = false;
-  }
-  void Get_Packet_Info()
-  {
-    m_pkt_is_data  = false;
-    m_rcvd_pkt_num = 0;
-
-    final byte[] pkt_data = m_data_pkt.getData();
-    final int    pkt_len  = m_data_pkt.getLength();
-
-    if( 5 <= pkt_len )
-    {
-      final int OPCODE = pkt_data[0];
-
-      if( OPCODE == OPCODE_DATA )
-      {
-        m_pkt_is_data = true;
-        m_rcvd_pkt_num = ( pkt_data[1] << 24 & 0xFF000000 )
-                       | ( pkt_data[2] << 16 & 0x00FF0000 ) 
-                       | ( pkt_data[3] <<  8 & 0x0000FF00 ) 
-                       | ( pkt_data[4] <<  0 & 0x000000FF );
-      }
-      else if( OPCODE == OPCODE_ERROR )
-      {
-        StringBuilder sb = new StringBuilder( pkt_len-2 );
-
-        for( int k=1; k<pkt_len-1; k++ )
+        final int err_str_len = m_din_stream.readInt();
+        StringBuilder sb = new StringBuilder( err_str_len );
+        for( int k=0; k<err_str_len; k++ )
         {
-          sb.append( (char)pkt_data[k] );
+          sb.append( m_din_stream.readChar() );
         }
-        Msg( sb.toString() );
-        m_running = false;
+        Die( m_server_str +": "+ sb.toString() );
       }
     }
+    catch( IOException e )
+    {
+      Die("Receive_Read_Request(): IOException: " + e);
+    }
+    return bytes_in_file;
   }
-  static final int  SERVER_PORT     = 6969;
-  static final int  MAX_WINDOW_SIZE = 8;
-  static final int  MAX_DATA_SIZE   = 512;
-  static final int  MAX_PKT_SIZE    = MAX_DATA_SIZE + 5;
-  static final int  ACK_SIZE        = 5;
+
+  //               |<1>|
+  // Read/Write    -----------------
+  // DATA          | 5 | File data |
+  //               -----------------
+  void Receive_File_Data( final long bytes_in_file )
+  {
+    if( m_running )
+    try {
+      final byte op_code = m_din_stream.readByte();
+
+      if( op_code != OPCODE_DATA )
+      {
+        Die("Receive_File_Data(): Received bad OPCODE: " + op_code);
+      }
+      else {
+        FileOutputStream fos = new FileOutputStream( m_dst_file );
+        BufferedOutputStream bos = new BufferedOutputStream( fos, 512 );
+
+        final long st_time = System.currentTimeMillis();
+
+        byte[] ba = new byte[512];
+
+        long total_bytes_read = 0;
+
+        while( total_bytes_read < bytes_in_file )
+        {
+          final int bytes_read = m_din_stream.read( ba );
+
+          if( 0 < bytes_read )
+          {
+            total_bytes_read += bytes_read;
+
+            bos.write( ba, 0, bytes_read );
+          }
+        }
+        m_tranfer_time_ms = System.currentTimeMillis() - st_time;
+        bos.flush();
+        bos.close();
+        fos.close();
+      }
+    }
+    catch( FileNotFoundException e )
+    {
+      Die("Receive_File_Data(): FileNotFoundException: " + e);
+    }
+    catch( IOException e )
+    {
+      Die("Receive_File_Data(): IOException: " + e);
+    }
+  }
+  void Print_summary_message( final long bytes_in_file )
+  {
+    if( m_running )
+    {
+      // If we are still running at this point we were successful,
+      // so print summary message:
+      String msg = "Received from "
+                 + m_server_inet_addr.getHostAddress() +":"
+                 + SERVER_PORT +": "
+                 + m_dst_fname +", "
+                 + bytes_in_file +" bytes in "
+                 + m_tranfer_time_ms +" ms";
+
+      if( 0 < m_tranfer_time_ms )
+      {
+        final double bits = bytes_in_file*8;
+        final double seconds = ((double)m_tranfer_time_ms)/1000;
+        long bits_per_sec = (long)(bits/seconds + 0.5);
+
+        String rate_label = "bits/sec";
+
+        if( 1e9 < bits_per_sec )
+        {
+          rate_label = "G-bits/sec";
+          bits_per_sec = (long)((double)(bits_per_sec)/1e9 + 0.5);
+        }
+        else if( 1e6 < bits_per_sec )
+        {
+          rate_label = "M-bits/sec";
+          bits_per_sec = (long)((double)(bits_per_sec)/1e6 + 0.5);
+        }
+        else if( 1e3 < bits_per_sec )
+        {
+          rate_label = "K-bits/sec";
+          bits_per_sec = (long)((double)(bits_per_sec)/1e3 + 0.5);
+        }
+        msg += ", "+ bits_per_sec + " " + rate_label;
+      }
+      Msg( msg );
+    }
+  }
+  void Clean_Up()
+  {
+    try {
+      if( null != m_socket )
+      {
+        m_socket.close();
+      }
+      if( null != m_din_stream )
+      {
+        m_din_stream.close();
+      }
+      if( null != m_dout_stream )
+      {
+        m_dout_stream.close();
+      }
+    }
+    catch( IOException e )
+    {
+      Msg("Clean_Up(): IOException: " + e);
+    }
+  }
   static final byte OPCODE_GET_REQ  = 1;
-  static final byte OPCODE_PUT_REQ  = 2;
-  static final byte OPCODE_DATA     = 3;
-  static final byte OPCODE_ACK      = 4;
-  static final byte OPCODE_ERROR    = 5;
+  static final byte OPCODE_GET_RESP = 2;
+  static final byte OPCODE_PUT_REQ  = 3;
+  static final byte OPCODE_PUT_RESP = 4;
+  static final byte OPCODE_DATA     = 5;
 
-  final String   m_peer_str;
-  final String   m_src_fname;
-  final String   m_dst_fname;
-  final Path     m_dst_path;
-  final FileOutputStream     m_fos;
-  final BufferedOutputStream m_bos;
+  static final int SERVER_PORT             = 6969;
+  static final int IS_REACHABLE_TIMEOUT_MS = 1000;
+  static final int CONNECT_TIMEOUT_MS      = 1000;
 
-  final DatagramSocket m_socket;
-  final InetAddress    m_peer_addr;
+  final String m_server_str;
+  final String m_src_fname;
+  final String m_dst_fname;
+  final Path   m_dst_path;
+  final Socket m_socket;
 
-  // m_data_pkt receives data packets, to okay to use MAX_PKT_SIZE
-  DatagramPacket m_data_pkt = new DatagramPacket( new byte[MAX_PKT_SIZE], MAX_PKT_SIZE );
-  DatagramPacket m_ack_pkt  = new DatagramPacket( new byte[ACK_SIZE], ACK_SIZE );
-
-  boolean m_success      = false;
-  boolean m_running      = true;
-  boolean m_got_last_pkt = false;
-  int     m_rcvd_pkt_num = 0;
-  int     m_next_pkt_num = 1; // Next expected packet number
-  boolean m_pkt_is_data  = false;
-
-  HashMap<Integer,DatagramPacket> m_data = new HashMap<>();
+  boolean              m_running = true;
+  InetAddress          m_server_inet_addr;
+  InetSocketAddress    m_server_inet_sock_addr;
+  File                 m_dst_file;
+  BufferedOutputStream m_bos;
+  DataInputStream      m_din_stream;
+  DataOutputStream     m_dout_stream;
+  long                 m_tranfer_time_ms;
 }
 

@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 // File Server Java Implementation                                            //
-// Copyright (c) 16 Apr 2017 Paul J. Gartside                                 //
+// Copyright (c) 31 Dec 2019 Paul J. Gartside                                 //
 ////////////////////////////////////////////////////////////////////////////////
 // Permission is hereby granted, free of charge, to any person obtaining a    //
 // copy of this software and associated documentation files (the "Software"), //
@@ -20,51 +20,77 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER        //
 // DEALINGS IN THE SOFTWARE.                                                  //
 ////////////////////////////////////////////////////////////////////////////////
-
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.FileSystems;
-import java.nio.file.Path;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.SocketException;
-import java.net.SocketTimeoutException;
-import java.util.HashMap;
-import java.util.Iterator;
-
 // ---------------------
 // File Protocol Summary
 // ---------------------
 //
-//               --------------------
-// Read  Request | 1 | filename | 0 |
-// GET           --------------------
-// 
-//               --------------------
-// Write Request | 2 | filename | 0 |
-// PUT           --------------------
-// 
-//                   |< 4 bytes >| 0 to 512 bytes|
-//               ---------------------------------
-// Data Packet   | 3 | packetnum | data          |
-// DATA          ---------------------------------
-// 
-//                   |< 4 bytes >|
-//               -----------------
-// Acknowledge   | 4 | packetnum |
-// ACK           -----------------
-// 
-//               ---------------------
-// Error         | 5 | errstring | 0 |
-// ERROR         ---------------------
+//               |<1>|<-- 4 bytes ---->|
+//               ----------------------------------------
+// Read  Request | 1 | Filename length | Filename       |
+// GET           |   | Num utf16 chars | in utf16 chars |
+//               ----------------------------------------
 //
+//               |<1>|< 1 byte >|<-- 4 bytes ------>|
+// Read          ------------------------------------
+// Response      | 2 | True=1   | num_bytes in file |
+// Affirmative   ------------------------------------
+//
+//               |<1>|< 1 byte >|<-- 4 bytes ---->|
+// Read          ----------------------------------------------
+// Response      | 2 | False=0  | Num utf16 chars | errstring |
+// Negative      |   | 00000000 | in errstring    |           |
+//               ----------------------------------------------
+//
+//               |<1>|< 4 bytes >|<-- 4 bytes ---->|
+//               ----------------------------------------------------
+// Write Request | 3 | num_bytes | Filename length | Filename       |
+// PUT           |   | in file   | Num utf16 chars | in utf16 chars |
+//               ----------------------------------------------------
+//
+//               |<1>|< 1 byte >|
+// Write         ----------------
+// Response      | 4 | True=1   |
+// Affirmative   |   | 00000001 |
+// Affirmative   ----------------
+//
+//               |<1>|< 1 byte >|<-- 4 bytes ---->|
+// Write         ----------------------------------------------
+// Response      | 4 | False=0  | Num utf16 chars | errstring |
+// Negative      |   | 00000000 | in errstring    |           |
+//               ----------------------------------------------
+//
+//               |<1>|
+// Read/Write    -----------------
+// DATA          | 5 | File data |
+//               -----------------
+//
+// ----------                         ----------
+// | Client |                         | Server |
+// ----------                         ----------
+//     |                                  |
+//     |--- Read Request ---------------->|
+//     |<-- Read Response Affirmative ----|
+//     |<-- File data --------------------|
+//     |                                  |
+//     |--- Read Request ---------------->|
+//     |<-- Read Response Negative -------|
+//     |                                  |
+//     |--- Write Request --------------->|
+//     |<-- Write Response Affirmative ---|
+//     |--- File data ------------------->|
+//     |                                  |
+//     |--- Write Request --------------->|
+//     |<-- Write Response Negative ------|
+//     |                                  |
+//
+
+import java.io.DataInputStream;
+import java.io.InputStream;
+import java.io.IOException;
+import java.net.Socket;
+import java.net.ServerSocket;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 
 class File_server
 {
@@ -73,9 +99,7 @@ class File_server
     if( args.length != 1 ) Usage();
 
     try {
-      File_server me = new File_server( args );
-
-      me.Run();
+      new File_server( args ).Run();
     }
     catch( Exception e )
     {
@@ -99,130 +123,168 @@ class File_server
   void Die( String msg )
   {
     Msg( msg );
-    System.exit( 0 );
+
+    m_running = false;
   }
-  File_server( String[] args ) throws Exception
+  File_server( String[] args )
   {
-    m_peer_str  = args[0];
-    m_socket    = new DatagramSocket( SERVER_PORT );
-    m_peer_addr = InetAddress.getByName( m_peer_str );
+    m_client_IP_str = args[0];
   }
-  void Run() throws Exception
+  void Run()
   {
+    Get_Client_Inet_Address();
+    Create_Server_Socket();
+
     // Keep running until killed:
-    while( true )
+    while( m_running )
     {
-      Wait_4_Request();
+      Request_Type req_type = Wait_4_Request();
 
-      if( m_req_type == Request_Type.GET )
+      if( req_type == Request_Type.GET )
       {
-        try {
-          new Handle_Get( m_socket, m_peer_addr, m_peer_port, m_fname ).Run();
-        }
-        catch( FileNotFoundException e )
-        {
-          Send_Error( "File_server: File not found: "+ m_fname );
-        }
+        new Handle_Get( m_client_sock, m_din_stream ).Run();
       }
-      else if( m_req_type == Request_Type.PUT )
+      else if( req_type == Request_Type.PUT )
       {
-        final Path m_path = FileSystems.getDefault().getPath( m_fname );
-
-        if( Files.isDirectory( m_path ) )
-        {
-          Send_Error( "File_server: File is a directory: "+ m_fname );
-        }
-        else if( Files.isRegularFile( m_path ) )
-        {
-          Send_Error( "File_server: File already exists: "+ m_fname );
-        }
-        else {
-          new Handle_Put( m_socket, m_peer_addr, m_peer_port, m_fname ).Run();
-        }
+        new Handle_Put( m_client_sock, m_din_stream ).Run();
       }
+      Clean_Up_Client();
+    }
+    Clean_Up_Server();
+  }
+  void Get_Client_Inet_Address()
+  {
+    try {
+      m_client_inet_addr = InetAddress.getByName( m_client_IP_str );
+    }
+    catch( UnknownHostException e )
+    {
+      Die(m_client_IP_str + ": UnknownHostException: "+ e);
     }
   }
-  void Wait_4_Request() throws IOException, SocketException
+  void Create_Server_Socket()
   {
-    boolean rcvd_req = false;
-
-    Msg("Listening on port: "+ SERVER_PORT );
-
-    while( !rcvd_req )
+    if( m_running )
+    try {
+      m_server_sock = new ServerSocket( SERVER_PORT );
+    }
+    catch( IOException e )
     {
-      m_req_pkt.setLength( MAX_PKT_SIZE );
-      m_socket.setSoTimeout( 0 );
-      m_socket.receive( m_req_pkt );
-
-      if( m_req_pkt.getAddress().equals( m_peer_addr ) )
-      {
-        final byte[] pkt_data = m_req_pkt.getData();
-        final int    pkt_len  = m_req_pkt.getLength();
-
-        if( 3 <= pkt_len )
-        {
-          final int OPCODE = pkt_data[0];
-
-          if( OPCODE == OPCODE_GET_REQ
-           || OPCODE == OPCODE_PUT_REQ )
-          {
-            if( OPCODE == OPCODE_GET_REQ ) m_req_type = Request_Type.GET;
-            else                           m_req_type = Request_Type.PUT;
-
-            rcvd_req = true;
-
-            m_peer_port = m_req_pkt.getPort();
-
-            m_sb.setLength( 0 );
-            for( int k=1; k<pkt_len-1; k++ )
-            {
-              m_sb.append( (char)pkt_data[k] );
-            }
-            m_fname = m_sb.toString();
-          }
-        }
-      }
+      Die("Create_Server_Socket(): IOException: "+ e);
     }
   }
-  void Send_Error( String msg ) throws IOException
+  Request_Type Wait_4_Request()
   {
-    final int msg_len = msg.length();
-    final int pkt_len = msg_len + 2;
+    Request_Type req_type = Request_Type.UNKNOWN;
 
-    DatagramPacket err_pkt = new DatagramPacket( new byte[pkt_len], pkt_len );
+    Accept_Client_Connection();
 
-    final byte[] pkt_data = err_pkt.getData();
-    pkt_data[ 0 ] = OPCODE_ERROR;
-
-    for( int k=0; k<msg_len; k++ )
+    if( m_running )
+    if( ! m_client_sock.getInetAddress().equals( m_client_inet_addr ) )
     {
-      pkt_data[ k+1 ] = (byte)msg.charAt( k );
+      Msg("Denied connection from: "+ m_client_sock.toString() );
     }
-    pkt_data[ 1+msg.length() ] = 0;
+    else {
+      Get_In_Stream();
 
-    err_pkt.setAddress( m_peer_addr );
-    err_pkt.setPort( m_peer_port );
-    err_pkt.setData( pkt_data ); // May not be necessary
-    m_socket.send( err_pkt );
+      final byte request = Read_Request();
 
-    Msg( msg );
+      if( request == OPCODE_GET_REQ )
+      {
+        req_type = Request_Type.GET;
+      }
+      else if( request == OPCODE_PUT_REQ )
+      {
+        req_type = Request_Type.PUT;
+      }
+    }
+    return req_type;
+  }
+  void Accept_Client_Connection()
+  {
+    Msg("Listening on: "+ m_server_sock.getLocalSocketAddress() );
+
+    try {
+      m_client_sock = m_server_sock.accept();
+    }
+    catch( IOException e )
+    {
+      Die("Accept_Client_Connection(): IOException: " + e);
+    }
+  }
+  byte Read_Request()
+  {
+    byte request = OPCODE_NONE;
+
+    if( m_running )
+    try {
+      request = m_din_stream.readByte();
+    }
+    catch( IOException e )
+    {
+      Die("Read_Request(): IOException: " + e);
+    }
+    return request;
+  }
+  void Get_In_Stream()
+  {
+    if( m_running )
+    try {
+      InputStream in_stream = m_client_sock.getInputStream();
+
+      m_din_stream = new DataInputStream( in_stream );
+    }
+    catch( IOException e )
+    {
+      Die("m_client_sock.getInputStream(): IOException: " + e);
+    }
+  }
+  void Clean_Up_Client()
+  {
+    try {
+      if( null != m_client_sock )
+      {
+        m_client_sock.close();
+      }
+      if( null != m_din_stream )
+      {
+        m_din_stream.close();
+      }
+    }
+    catch( IOException e )
+    {
+      Msg("Clean_Up_Client(): IOException: " + e);
+    }
+  }
+  void Clean_Up_Server()
+  {
+    try {
+      if( null != m_server_sock )
+      {
+        m_server_sock.close();
+      }
+    }
+    catch( IOException e )
+    {
+      Msg("Clean_Up_Server(): IOException: " + e);
+    }
   }
   static final int  SERVER_PORT     = 6969;
-  static final int  MAX_DATA_SIZE   = 512;
-  static final int  MAX_PKT_SIZE    = MAX_DATA_SIZE + 5;
+
+  static final byte OPCODE_NONE     = 0;
   static final byte OPCODE_GET_REQ  = 1;
-  static final byte OPCODE_PUT_REQ  = 2;
-  static final byte OPCODE_ERROR    = 5;
+  static final byte OPCODE_GET_RESP = 2;
+  static final byte OPCODE_PUT_REQ  = 3;
+  static final byte OPCODE_PUT_RESP = 4;
+  static final byte OPCODE_DATA     = 5;
 
-  final String         m_peer_str;
-  final DatagramSocket m_socket;
-  final InetAddress    m_peer_addr;
-        int            m_peer_port;
+  final String m_client_IP_str;
 
-  DatagramPacket m_req_pkt = new DatagramPacket( new byte[MAX_PKT_SIZE], MAX_PKT_SIZE );
-  Request_Type   m_req_type = Request_Type.UNKNOWN;
-  StringBuilder  m_sb = new StringBuilder();
-  String         m_fname;
+  boolean         m_running = true;
+  InetAddress     m_client_inet_addr;
+  ServerSocket    m_server_sock;
+  Socket          m_client_sock;
+  DataInputStream m_din_stream;
 }
 
 enum Request_Type

@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 // File Server Java Implementation                                            //
-// Copyright (c) 16 Apr 2017 Paul J. Gartside                                 //
+// Copyright (c) 31 Dec 2019 Paul J. Gartside                                 //
 ////////////////////////////////////////////////////////////////////////////////
 // Permission is hereby granted, free of charge, to any person obtaining a    //
 // copy of this software and associated documentation files (the "Software"), //
@@ -20,265 +20,298 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER        //
 // DEALINGS IN THE SOFTWARE.                                                  //
 ////////////////////////////////////////////////////////////////////////////////
-
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.FileSystems;
-import java.nio.file.Path;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.SocketException;
-import java.net.SocketTimeoutException;
-import java.util.HashMap;
-import java.util.Iterator;
-
 // ---------------------
 // File Protocol Summary
 // ---------------------
 //
-//               --------------------
-// Read  Request | 1 | filename | 0 |
-// GET           --------------------
+//               |<1>|<-- 4 bytes ---->|
+//               ----------------------------------------
+// Read  Request | 1 | Filename length | Filename       |
+// GET           |   | Num utf16 chars | in utf16 chars |
+//               ----------------------------------------
 //
-//               --------------------
-// Write Request | 2 | filename | 0 |
-// PUT           --------------------
+//               |<1>|< 1 byte >|<-- 4 bytes ------>|
+// Read          ------------------------------------
+// Response      | 2 | True=1   | num_bytes in file |
+// Affirmative   ------------------------------------
 //
-//                   |< 4 bytes >| 0 to 512 bytes|
-//               ---------------------------------
-// Data Packet   | 3 | packetnum | data          |
-// DATA          ---------------------------------
+//               |<1>|< 1 byte >|<-- 4 bytes ---->|
+// Read          ----------------------------------------------
+// Response      | 2 | False=0  | Num utf16 chars | errstring |
+// Negative      |   | 00000000 | in errstring    |           |
+//               ----------------------------------------------
 //
-//                   |< 4 bytes >|
+//               |<1>|< 4 bytes >|<-- 4 bytes ---->|
+//               ----------------------------------------------------
+// Write Request | 3 | num_bytes | Filename length | Filename       |
+// PUT           |   | in file   | Num utf16 chars | in utf16 chars |
+//               ----------------------------------------------------
+//
+//               |<1>|< 1 byte >|
+// Write         ----------------
+// Response      | 4 | True=1   |
+// Affirmative   |   | 00000001 |
+// Affirmative   ----------------
+//
+//               |<1>|< 1 byte >|<-- 4 bytes ---->|
+// Write         ----------------------------------------------
+// Response      | 4 | False=0  | Num utf16 chars | errstring |
+// Negative      |   | 00000000 | in errstring    |           |
+//               ----------------------------------------------
+//
+//               |<1>|
+// Read/Write    -----------------
+// DATA          | 5 | File data |
 //               -----------------
-// Acknowledge   | 4 | packetnum |
-// ACK           -----------------
 //
-//               ---------------------
-// Error         | 5 | errstring | 0 |
-// ERROR         ---------------------
+// ----------                         ----------
+// | Client |                         | Server |
+// ----------                         ----------
+//     |                                  |
+//     |--- Read Request ---------------->|
+//     |<-- Read Response Affirmative ----|
+//     |<-- File data --------------------|
+//     |                                  |
+//     |--- Read Request ---------------->|
+//     |<-- Read Response Negative -------|
+//     |                                  |
+//     |--- Write Request --------------->|
+//     |<-- Write Response Affirmative ---|
+//     |--- File data ------------------->|
+//     |                                  |
+//     |--- Write Request --------------->|
+//     |<-- Write Response Negative ------|
+//     |                                  |
 //
-// ----------           ----------
-// | Client |           | Server |
-// ----------           ----------
-//     |                    |
-//     |-- Write Request -->|
-//     |                    |
-//     |<-- Ack 0 ----------|
-//     |                    |
-//     |--- Data Packet 1 ->|
-//     |<-- Ack 1 ----------|
-//     |                    |
-//     |--- Data Packet 2 ->|
-//     |--- Data Packet 3 ->|
-//     |<-- Ack 2 ----------|
-//     |<-- Ack 3 ----------|
-//     |                    |
-//
+
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.FileSystems;
+import java.nio.file.Path;
 
 class Handle_Put
 {
-  Handle_Put( DatagramSocket socket
-            , InetAddress    peer_addr
-            , int            peer_port
-            , String         in_fname )
+  Handle_Put( Socket          socket
+            , DataInputStream din_stream )
   {
-    m_socket     = socket;
-    m_peer_addr  = peer_addr;
-    m_peer_port  = peer_port;
-    m_out_fname  = in_fname;
-
-    m_ack_pkt.setAddress( m_peer_addr );
-    m_ack_pkt.setPort( m_peer_port );
+    m_socket         = socket;
+    m_din_stream     = din_stream;
+    m_client_IP_addr = m_socket.getInetAddress();
   }
   void Msg( String msg )
   {
     System.out.println("File_server: " + msg );
   }
-  void Run() throws FileNotFoundException, IOException
+  void Die( String msg )
   {
-    m_fos = new FileOutputStream( m_out_fname );
-    m_bos = new BufferedOutputStream( m_fos, 512 );
+    Msg( msg );
 
-    // Send first ack to get the peer started sending data:
-    Send_Ack( m_rcvd_pkt_num );
-
-    while( m_running )
-    {
-      Recv_Data();
-    }
-    m_bos.flush();
-    m_fos.close();
-
-    if( m_success )
-    {
-      Msg( "Received from "
-         + m_peer_addr.getHostAddress() +":"
-         + m_peer_port +": "
-         + m_out_fname );
-    }
+    m_running = false;
   }
-  void Recv_Data() throws SocketException, IOException
+  void Run()
   {
-    Wait_4_Data_Packet( 4000 );
+    final boolean ok = Receive_Write_Request();
+    Send_Write_Response( ok );
+    Receive_File_Data();
 
     if( m_running )
     {
-      Get_Packet_Info();
-
-      if( m_pkt_is_data )
-      {
-        final int max_pkt_num = m_next_pkt_num + MAX_WINDOW_SIZE - 1;
-
-        if( m_next_pkt_num <= m_rcvd_pkt_num && m_rcvd_pkt_num <= max_pkt_num )
-        {
-          if( m_next_pkt_num < m_rcvd_pkt_num )
-          {
-            // Received a packet out of order, so cache it:
-            m_data.put( m_rcvd_pkt_num, m_data_pkt );
-          }
-          else { // Received next packet, so save to file:
-            Save_Packet_2_File( m_data_pkt );
-
-            // See how many other previously cached packets can be saved to file:
-            while( m_data.containsKey( m_next_pkt_num ) )
-            {
-              Save_Packet_2_File( m_data.remove( m_next_pkt_num ) );
-            }
-            if( m_got_last_pkt && 0==m_data.size() )
-            {
-              m_running = false;
-              m_success = true;
-            }
-          }
-          // Always ack a received packet:
-          Send_Ack( m_rcvd_pkt_num );
-        }
-      }
+      Msg( "Received from "
+         + m_client_IP_addr.getHostAddress() +":"
+         + m_socket.getPort() +": "
+         + m_dst_fname );
     }
   }
-  void Save_Packet_2_File( DatagramPacket pkt ) throws IOException
+  boolean Receive_Write_Request()
   {
-    final int data_len = pkt.getLength()-5;
+    boolean ok = false;
 
-    if( data_len < 512 ) m_got_last_pkt = true;
-
-    m_bos.write( pkt.getData(), 5, data_len );
-    m_next_pkt_num++;
-  }
-  void Send_Ack( final int ack_num ) throws IOException
-  {
-    final byte[] pkt_data = m_ack_pkt.getData();
-    pkt_data[ 0 ] = OPCODE_ACK;
-    pkt_data[ 1 ] = (byte)(ack_num >> 24 & 0xFF);
-    pkt_data[ 2 ] = (byte)(ack_num >> 16 & 0xFF);
-    pkt_data[ 3 ] = (byte)(ack_num >>  8 & 0xFF);
-    pkt_data[ 4 ] = (byte)(ack_num >>  0 & 0xFF);
-    m_ack_pkt.setData( pkt_data ); // May not be necessary
-    m_socket.send( m_ack_pkt );
-  }
-  void
-  Wait_4_Data_Packet( final long TIMEOUT ) throws SocketException
-                                                , IOException
-  {
-    final long START_TIME = System.currentTimeMillis();
-
-    for( long time_left = TIMEOUT
-       ; 0 < time_left
-       ; time_left = TIMEOUT - (System.currentTimeMillis() - START_TIME) )
+    try {
+      ok = Receive_Write_Request_e();
+    }
+    catch( IOException e )
     {
-      m_data_pkt.setLength( MAX_PKT_SIZE );
-      m_socket.setSoTimeout( (int)time_left );
-      m_socket.receive( m_data_pkt );
+      Die("Receive_Write_Request(): IOException: "+ e);
+    }
+    return ok;
+  }
+  //               |<1>|< 4 bytes >|<-- 4 bytes ---->|
+  //               ----------------------------------------------------
+  // Write Request | 3 | num_bytes | Filename length | Filename       |
+  // PUT           |   | in file   | Num utf16 chars | in utf16 chars |
+  //               ----------------------------------------------------
+  boolean Receive_Write_Request_e() throws IOException
+  {
+    boolean ok = false;
 
-      if( m_data_pkt.getAddress().equals( m_peer_addr )
-       && m_data_pkt.getPort() == m_peer_port )
+    m_dst_file_len = m_din_stream.readInt();
+
+    final int fname_len = m_din_stream.readInt();
+
+    if( fname_len <= 0 )
+    {
+      m_err_msg = m_socket.getLocalSocketAddress()
+                + ": Received bad filename length: "+ fname_len;
+    }
+    else {
+      StringBuilder sb = new StringBuilder( fname_len );
+
+      for( int k=0; k<fname_len; k++ )
       {
-        return; // Received a packet from TGT_ADDR:TGT_PORT
+        sb.append( m_din_stream.readChar() );
+      }
+      m_dst_fname = sb.toString();
+
+      m_dst_path = FileSystems.getDefault().getPath( m_dst_fname );
+
+      if( Files.isDirectory( m_dst_path ) )
+      {
+        m_err_msg = m_socket.getLocalSocketAddress()
+                  + ": File is a directory: "+ m_dst_fname;
+      }
+      else if( Files.isRegularFile( m_dst_path ) )
+      {
+        m_err_msg = m_socket.getLocalSocketAddress()
+                  + ": File already exists: "+ m_dst_fname;
       }
       else {
-        ; // Packet not from target process, so wait for another packet
+        ok = true;
       }
     }
-    m_running = false;
+    return ok;
   }
-//void
-//Wait_4_Data_Packet( final long TIMEOUT ) throws SocketException
-//                                              , IOException
-//{
-//  final long START_TIME = System.currentTimeMillis();
-//
-//  while( true )
-//  {
-//    m_data_pkt.setLength( MAX_PKT_SIZE );
-//    m_socket.receive( m_data_pkt );
-//
-//    if( m_data_pkt.getAddress().equals( m_peer_addr )
-//     && m_data_pkt.getPort() == m_peer_port )
-//    {
-//      return; // Received a packet from TGT_ADDR:TGT_PORT
-//    }
-//    else {
-//      ; // Packet not from target process, so wait for another packet
-//    }
-//  }
-////m_running = false;
-//}
-  void Get_Packet_Info()
+  void Send_Write_Response( final boolean ok )
   {
-    m_pkt_is_data  = false;
-    m_rcvd_pkt_num = 0;
-
-    final byte[] pkt_data = m_data_pkt.getData();
-    final int    pkt_len  = m_data_pkt.getLength();
-
-    if( 5 <= pkt_len )
+    try {
+      Send_Write_Response_e( ok );
+    }
+    catch( IOException e )
     {
-      final int OPCODE = pkt_data[0];
+      Die("Send_Write_Response(): IOException: "+ e);
+    }
+  }
+  //               |<1>|< 1 byte >|
+  // Write         ----------------
+  // Response      | 4 | True=1   |
+  // Affirmative   |   | 00000001 |
+  // Affirmative   ----------------
+  //
+  //               |<1>|< 1 byte >|<-- 4 bytes ---->|
+  // Write         ----------------------------------------------
+  // Response      | 4 | False=0  | Num utf16 chars | errstring |
+  // Negative      |   | 00000000 | in errstring    |           |
+  //               ----------------------------------------------
+  void Send_Write_Response_e( final boolean ok ) throws IOException
+  {
+    Get_Out_Stream();
 
-      if( OPCODE == OPCODE_DATA )
-      {
-        m_pkt_is_data = true;
-        m_rcvd_pkt_num = ( pkt_data[1] << 24 & 0xFF000000 )
-                       | ( pkt_data[2] << 16 & 0x00FF0000 )
-                       | ( pkt_data[3] <<  8 & 0x0000FF00 )
-                       | ( pkt_data[4] <<  0 & 0x000000FF );
+    if( m_running )
+    {
+      m_dout_stream.writeByte( OPCODE_PUT_RESP );
+
+      if( ok ) {
+        m_dout_stream.writeByte( 1 );
+      }
+      else {
+        m_dout_stream.writeByte( 0 );
+        m_dout_stream.writeInt( m_err_msg.length() );
+        m_dout_stream.writeChars( m_err_msg );
+        Die( m_err_msg );
       }
     }
   }
-  static final int  MAX_WINDOW_SIZE = 8;
-  static final int  MAX_DATA_SIZE   = 512;
-  static final int  MAX_PKT_SIZE    = MAX_DATA_SIZE + 5;
-  static final int  ACK_SIZE        = 5;
-  static final byte OPCODE_DATA     = 3;
-  static final byte OPCODE_ACK      = 4;
 
-  FileOutputStream     m_fos;
-  BufferedOutputStream m_bos;
+  void Receive_File_Data()
+  {
+    if( m_running )
+    try {
+      Receive_File_Data_e();
+    }
+    catch( FileNotFoundException e )
+    {
+      Die("Receive_File_Data(): FileNotFoundException: "+ e);
+    }
+    catch( IOException e )
+    {
+      Die("Receive_File_Data(): IOException: "+ e);
+    }
+  }
+  //               |<1>|
+  // Read/Write    -----------------
+  // DATA          | 5 | File data |
+  //               -----------------
+  void Receive_File_Data_e() throws IOException, FileNotFoundException
+  {
+    final byte op_code = m_din_stream.readByte();
 
-  final DatagramSocket m_socket;
-  final InetAddress    m_peer_addr;
-  final int            m_peer_port;
-  final String         m_out_fname;
+    if( op_code != OPCODE_DATA )
+    {
+      Die("Receive_File_Data(): Received bad OPCODE: " + op_code);
+    }
+    else {
+      File dst_file = m_dst_path.toFile();
+      FileOutputStream fos = new FileOutputStream( dst_file );
+      BufferedOutputStream bos = new BufferedOutputStream( fos, 512 );
 
-  // m_data_pkt receives data packets, to okay to use MAX_PKT_SIZE
-  DatagramPacket m_data_pkt = new DatagramPacket( new byte[MAX_PKT_SIZE], MAX_PKT_SIZE );
-  DatagramPacket m_ack_pkt  = new DatagramPacket( new byte[ACK_SIZE], ACK_SIZE );
+      final long st_time = System.currentTimeMillis();
 
-  boolean m_success      = false;
-  boolean m_running      = true;
-  boolean m_got_last_pkt = false;
-  int     m_rcvd_pkt_num = 0;
-  int     m_next_pkt_num = 1; // Next expected packet number
-  boolean m_pkt_is_data  = false;
+      byte[] ba = new byte[512];
 
-  HashMap<Integer,DatagramPacket> m_data = new HashMap<>();
+      long total_bytes_read = 0;
+
+      while( total_bytes_read < m_dst_file_len )
+      {
+        final int bytes_read = m_din_stream.read( ba );
+
+        if( 0 < bytes_read )
+        {
+          total_bytes_read += bytes_read;
+
+          bos.write( ba, 0, bytes_read );
+        }
+      }
+      bos.flush();
+      bos.close();
+      fos.close();
+    }
+  }
+  void Get_Out_Stream()
+  {
+    if( m_running )
+    try {
+      OutputStream out_stream = m_socket.getOutputStream();
+
+      m_dout_stream = new DataOutputStream( out_stream );
+    }
+    catch( IOException e )
+    {
+      Die("m_socket.getOutputStream(): IOException: " + e);
+    }
+  }
+  static final byte OPCODE_GET_REQ  = 1;
+  static final byte OPCODE_GET_RESP = 2;
+  static final byte OPCODE_PUT_REQ  = 3;
+  static final byte OPCODE_PUT_RESP = 4;
+  static final byte OPCODE_DATA     = 5;
+
+  final Socket          m_socket;
+  final DataInputStream m_din_stream;
+  final InetAddress     m_client_IP_addr;
+
+  boolean          m_running = true;
+  String           m_dst_fname;
+  Path             m_dst_path;
+  int              m_dst_file_len;
+  DataOutputStream m_dout_stream;
+  String           m_err_msg;
 }
 
