@@ -3,11 +3,11 @@
 #set -o xtrace
 #set -o noexec
 
-NAME=GenAscii
+NAME=File_get
 
 CLASS_DIR=classes
 
-FILES='GenAscii'
+FILES='File_Get'
 
 # Running without arguments will make without cleaning
 clean=false

@@ -22,6 +22,8 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 import javafx.application.Application;
+import javafx.beans.value.ObservableValue;
+import javafx.beans.value.ChangeListener;
 import javafx.event.ActionEvent;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
@@ -76,8 +78,12 @@ public class GenAscii extends Application
     AddRow_9( root );
     AddRow_A( root );
 
-    Scene scene = new Scene(root);
-    stage.setScene(scene);
+    m_scene = new Scene(root);
+
+    m_scene.widthProperty ().addListener( this::Scene_resize_CB );
+    m_scene.heightProperty().addListener( this::Scene_resize_CB );
+
+    stage.setScene( m_scene );
     stage.setTitle("Generate Ascii");
     stage.show();
   }
@@ -431,30 +437,25 @@ public class GenAscii extends Application
   {
     final int row_span = 1;
     final int row = 8;
-    Label  pass_label = new Label("Password:");
-         m_pass_field = new TextField();
-    Font f = Font.font( "Courier", FontWeight.NORMAL, m_pass_field.getHeight()-2 );
-         m_pass_field.setFont( f );
 
     final int lbl_col      =  0;
     final int lbl_col_span =  2;
     final int fld_col      =  3;
     final int fld_col_span = 10;
 
-      pass_label.setMaxWidth(Double.MAX_VALUE);   pass_label.setMaxHeight(Double.MAX_VALUE);
+    m_pass_label.setMaxWidth(Double.MAX_VALUE); m_pass_label.setMaxHeight(Double.MAX_VALUE);
     m_pass_field.setMaxWidth(Double.MAX_VALUE); m_pass_field.setMaxHeight(Double.MAX_VALUE);
 
-    root.add(  pass_label, lbl_col, row, lbl_col_span, row_span);
+    root.add(m_pass_label, lbl_col, row, lbl_col_span, row_span);
     root.add(m_pass_field, fld_col, row, fld_col_span, row_span);
 
-    GridPane.setVgrow(  pass_label, Priority.ALWAYS);
+    GridPane.setVgrow(m_pass_label, Priority.ALWAYS);
     GridPane.setVgrow(m_pass_field, Priority.ALWAYS);
   }
   void AddRow_9( GridPane root )
   {
     final int row_span = 1;
     final int row = 9;
-    Label name_label = new Label("Possibilities:");
         m_posi_label = new Label("0");
 
     final int name_col      =  0;
@@ -462,13 +463,13 @@ public class GenAscii extends Application
     final int  pos_col      =  3;
     final int  pos_col_span = 10;
 
-      name_label.setMaxWidth(Double.MAX_VALUE);   name_label.setMaxHeight(Double.MAX_VALUE);
+    m_name_label.setMaxWidth(Double.MAX_VALUE); m_name_label.setMaxHeight(Double.MAX_VALUE);
     m_posi_label.setMaxWidth(Double.MAX_VALUE); m_posi_label.setMaxHeight(Double.MAX_VALUE);
 
-    root.add(  name_label, name_col, row, name_col_span, row_span);
+    root.add(m_name_label, name_col, row, name_col_span, row_span);
     root.add(m_posi_label,  pos_col, row,  pos_col_span, row_span);
 
-    GridPane.setVgrow(  name_label, Priority.ALWAYS);
+    GridPane.setVgrow(m_name_label, Priority.ALWAYS);
     GridPane.setVgrow(m_posi_label, Priority.ALWAYS);
   }
   void AddRow_A( GridPane root )
@@ -477,25 +478,25 @@ public class GenAscii extends Application
     final int row_span = 1;
     final int row = 10;
 
-    Button b_gener = new Button("Generate");
-    Button b_clear = new Button("Clear");
-    Button b_close = new Button("Close");
+  //Button b_gener = new Button("Generate");
+  //Button b_clear = new Button("Clear");
+  //Button b_close = new Button("Close");
 
-    b_gener.setOnAction( e -> GenerateHandler( e ) );
-    b_clear.setOnAction( e -> ClearHandler( e ) );
-    b_close.setOnAction( e -> CloseHandler( e ) );
+    m_b_gener.setOnAction( e -> GenerateHandler( e ) );
+    m_b_clear.setOnAction( e -> ClearHandler( e ) );
+    m_b_close.setOnAction( e -> CloseHandler( e ) );
 
-    b_gener.setMaxWidth(Double.MAX_VALUE); b_gener.setMaxHeight(Double.MAX_VALUE);
-    b_clear.setMaxWidth(Double.MAX_VALUE); b_clear.setMaxHeight(Double.MAX_VALUE);
-    b_close.setMaxWidth(Double.MAX_VALUE); b_close.setMaxHeight(Double.MAX_VALUE);
+    m_b_gener.setMaxWidth(Double.MAX_VALUE); m_b_gener.setMaxHeight(Double.MAX_VALUE);
+    m_b_clear.setMaxWidth(Double.MAX_VALUE); m_b_clear.setMaxHeight(Double.MAX_VALUE);
+    m_b_close.setMaxWidth(Double.MAX_VALUE); m_b_close.setMaxHeight(Double.MAX_VALUE);
 
-    root.add(b_gener,  2, row, 3       , row_span);
-    root.add(b_clear,  6, row, col_span, row_span);
-    root.add(b_close,  9, row, col_span, row_span);
+    root.add(m_b_gener,  2, row, 3       , row_span);
+    root.add(m_b_clear,  6, row, col_span, row_span);
+    root.add(m_b_close,  9, row, col_span, row_span);
 
-    root.setHgrow( b_gener, Priority.ALWAYS); root.setVgrow( b_gener, Priority.ALWAYS);
-    root.setHgrow( b_clear, Priority.ALWAYS); root.setVgrow( b_clear, Priority.ALWAYS);
-    root.setHgrow( b_close, Priority.ALWAYS); root.setVgrow( b_close, Priority.ALWAYS);
+    root.setHgrow( m_b_gener, Priority.ALWAYS); root.setVgrow( m_b_gener, Priority.ALWAYS);
+    root.setHgrow( m_b_clear, Priority.ALWAYS); root.setVgrow( m_b_clear, Priority.ALWAYS);
+    root.setHgrow( m_b_close, Priority.ALWAYS); root.setVgrow( m_b_close, Priority.ALWAYS);
   }
   Button mk_Button( String label )
   {
@@ -532,9 +533,6 @@ public class GenAscii extends Application
 
     return b;
   }
-//void ButtonHeight_CB()
-//{
-//}
   void ButtonHandler( ActionEvent e )
   {
     // Button -> char
@@ -549,7 +547,6 @@ public class GenAscii extends Application
       Add_Char( C );
       b.setStyle(m_btn_style_blue);
     }
-//System.out.println("C:"+C+" :removed: "+ removed);
   }
   void specialHandler( ActionEvent e )
   {
@@ -724,13 +721,51 @@ public class GenAscii extends Application
 
     return Integer.toString( TC );
   }
+  void Scene_resize_CB( ObservableValue<? extends Number> ov
+                      , Number old_val
+                      , Number new_val )
+  {
+    final double h = m_scene.getHeight();
+    final double w = m_scene.getWidth();
+
+    // Arbitrarily chosen font size calculation that works well.
+    final double font_size = (h+w)/64;
+
+    Font f = Font.font( "Courier", FontWeight.NORMAL, font_size );
+
+    for( Button b : m_number_buttons ) b.setFont( f );
+    for( Button b : m_LC_let_buttons ) b.setFont( f );
+    for( Button b : m_UC_let_buttons ) b.setFont( f );
+    for( Button b : m_special_buttons) b.setFont( f );
+
+    m_special.setFont( f );
+        m_0_9.setFont( f );
+        m_A_Z.setFont( f );
+        m_a_z.setFont( f );
+
+    m_b_gener.setFont( f );
+    m_b_clear.setFont( f );
+    m_b_close.setFont( f );
+
+    m_pass_label.setFont( f );
+    m_pass_field.setFont( f );
+    m_posi_label.setFont( f );
+    m_name_label.setFont( f );
+  }
 
   String m_btn_style_blue = "-fx-background-color: skyblue";
   String m_btn_style_red  = "-fx-background-color: pink";
   String m_btn_style_tan  = "-fx-background-color: wheat";
 
+  Scene  m_scene;
+  Button m_b_gener = new Button("Generate");
+  Button m_b_clear = new Button("Clear");
+  Button m_b_close = new Button("Close");
+
+  Label     m_pass_label = new Label("Password:");
   TextField m_pass_field = new TextField();
   Label     m_posi_label = new Label("0");
+  Label     m_name_label = new Label("Possibilities:");
 
   Map<Button,Character> m_map = new HashMap<>();
   List<Character> m_chars = new ArrayList<>();
